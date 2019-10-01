@@ -1,4 +1,4 @@
-mod block_mgr;
+mod inode_mgr;
 
 fn main() {
     println!("Hello, world!");

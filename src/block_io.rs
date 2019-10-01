@@ -3,7 +3,7 @@ pub type Id = u16;
 
 pub trait BlockIO {
     fn read(&mut self, blockId: Id) -> Result<[u8; BLOCK_SIZE], std::io::Error>;
-    fn write(&mut self, blockId: Id, data: &[u8; BLOCK_SIZE]) -> Result<(), std::io::Error>;
+    fn write(&mut self, blockId: Id, data: &[u8]) -> Result<(), std::io::Error>;
 }
 
 pub struct FakeMemBlockIO {
@@ -28,9 +28,10 @@ impl BlockIO for FakeMemBlockIO {
         Ok(*self.blocks[blockId as usize])
     }
 
-    fn write(&mut self, blockId: Id, data: &[u8; BLOCK_SIZE]) -> Result<(), std::io::Error> {
+    fn write(&mut self, blockId: Id, data: &[u8]) -> Result<(), std::io::Error> {
+        assert_eq!(data.len(), BLOCK_SIZE);
         self.ensure_length(blockId);
-        *self.blocks[blockId as usize] = *data;
+        self.blocks[blockId as usize].copy_from_slice(data);
         Ok(())
     }
 }

@@ -2,6 +2,7 @@
 mod block_io;
 
 use block_io::*;
+pub use block_io::{Id, BLOCK_SIZE, FakeMemBlockIO};
 
 pub struct BlockMgr {
     block_io: Box<dyn BlockIO>,
@@ -24,16 +25,20 @@ impl BlockMgr {
                 return Ok((i * 8 + occupied) as Id)
             }
         }
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "No empty block"))
+        Err(std::io::Error::from_raw_os_error(28)) // ENOSPC
     }
 
     pub fn new(block_io: Box<dyn BlockIO>) -> BlockMgr {
         BlockMgr { block_io: block_io, bitmap_block: [0; BLOCK_SIZE] }
     }
 
-    pub fn init(&mut self) -> Result<(), std::io::Error> {
+    pub fn is_formatted(&mut self) -> Result<bool, std::io::Error> {
         let super_block = self.block_io.read(0)?;
-        if &super_block[0 .. 4] != [114, 102, 115, 46] {
+        Ok(&super_block[0 .. 4] == [114, 102, 115, 46])
+    }
+
+    pub fn init(&mut self, need_format: bool) -> Result<(), std::io::Error> {
+        if need_format {
             self.format()?;
         }
         self.bitmap_block = self.block_io.read(1)?;
@@ -55,12 +60,12 @@ impl BlockMgr {
 
     pub fn read_block(&mut self, id: Id) -> Result<[u8; BLOCK_SIZE], std::io::Error> {
         assert!((self.bitmap_block[(id / 8) as usize] & (1 << (id % 8))) != 0);
-        self.block_io.read(id)
+        self.block_io.read(id + 2)
     }
 
-    pub fn write_block(&mut self, id: Id, data: &[u8; BLOCK_SIZE]) -> Result<(), std::io::Error> {
+    pub fn write_block(&mut self, id: Id, data: &[u8]) -> Result<(), std::io::Error> {
         assert!((self.bitmap_block[(id / 8) as usize] & (1 << (id % 8))) != 0);
-        self.block_io.write(id, data)
+        self.block_io.write(id + 2, data)
     }
 }
 
@@ -71,6 +76,8 @@ mod tests {
     #[test]
     fn test_new_del_blocks() -> Result<(), std::io::Error> {
         let mut block_mgr = BlockMgr::new(Box::new(FakeMemBlockIO::new()));
+        let need_format = !block_mgr.is_formatted()?;
+        block_mgr.init(need_format)?;
         for i in 0 .. 32 {
             let id = block_mgr.new_block()?;
             assert_eq!(id, i);
