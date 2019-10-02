@@ -1,7 +1,14 @@
+extern crate libc;
+
+use std::convert::TryInto;
+
 #[path="inode.rs"]
-mod inode;
+pub mod inode;
+pub use inode::{block_io, block_mgr};
 
 use inode::*;
+use block_io::{Id, BLOCK_SIZE};
+use block_mgr::BlockMgr;
 
 pub struct FileMgr {
     block_mgr: Box<BlockMgr>,
@@ -20,14 +27,19 @@ impl FileMgr {
         self.block_mgr.init(need_format)?;
         if need_format {
             let root_inode = self.new_inode()?;
-            assert_eq!(root_inode.id(), 0);
+            assert_eq!(root_inode.id(), 1);
         }
         Ok(())
     }
 
     pub fn new_inode(&mut self) -> Result<Inode, std::io::Error> {
         let id = self.block_mgr.new_block()?;
-        self.block_mgr.write_block(id, &[0; BLOCK_SIZE])?;
+        let mut block = self.block_mgr.read_block(id)?;
+        let mut generation = u64::from_le_bytes(block[0 .. 8].try_into().unwrap());
+        generation = generation.overflowing_add(1).0;
+        block[0 .. 8].copy_from_slice(&generation.to_le_bytes());
+        block[8 ..].copy_from_slice(&[0; BLOCK_SIZE - 8]);
+        self.block_mgr.write_block(id, &block)?;
         Inode::new(&mut*self.block_mgr, id)
     }
 
@@ -36,7 +48,7 @@ impl FileMgr {
     }
 
     pub fn read_root_inode(&mut self) -> Result<Inode, std::io::Error> {
-        self.read_inode(0)
+        self.read_inode(1)
     }
 
     pub fn del_inode(&mut self, inode: &Inode) -> Result<(), std::io::Error> {
@@ -145,7 +157,7 @@ impl FileMgr {
         inode.flush(&mut*self.block_mgr)?;
         if let Err(error) = result {
             if let Some(errno) = error.raw_os_error() {
-                if errno != 28 { // ENOSPC
+                if errno != libc::ENOSPC {
                     return Err(error)
                 }
             }
@@ -179,11 +191,16 @@ impl FileMgr {
         inode.set_length(length as u32);
         inode.flush(&mut*self.block_mgr)
     }
+
+    pub fn flush(&mut self, inode: &mut Inode) -> Result<(), std::io::Error> {
+        inode.flush(&mut*self.block_mgr)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use block_io::FakeMemBlockIO;
 
     fn init() -> Result<Box<FileMgr>, std::io::Error> {
         let block_io = Box::new(FakeMemBlockIO::new());

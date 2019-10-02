@@ -1,8 +1,10 @@
+extern crate libc;
+
 #[path="block_io.rs"]
-mod block_io;
+pub mod block_io;
 
 use block_io::*;
-pub use block_io::{Id, BLOCK_SIZE, FakeMemBlockIO};
+use block_io::{Id, BLOCK_SIZE};
 
 pub struct BlockMgr {
     block_io: Box<dyn BlockIO>,
@@ -25,7 +27,7 @@ impl BlockMgr {
                 return Ok((i * 8 + occupied) as Id)
             }
         }
-        Err(std::io::Error::from_raw_os_error(28)) // ENOSPC
+        Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
     }
 
     pub fn new(block_io: Box<dyn BlockIO>) -> BlockMgr {
@@ -49,21 +51,24 @@ impl BlockMgr {
         let id = self.first_empty_block()?;
         self.bitmap_block[(id / 8) as usize] |= 1 << (id % 8);
         self.block_io.write(1, &self.bitmap_block)?;
-        Ok(id)
+        Ok(id + 1) // Root inode = 1
     }
 
-    pub fn del_block(&mut self, id: Id) -> Result<(), std::io::Error> {
+    pub fn del_block(&mut self, _id: Id) -> Result<(), std::io::Error> {
+        let id = _id - 1;
         self.bitmap_block[(id / 8) as usize] &= !(1 << (id % 8));
         self.block_io.write(1, &self.bitmap_block)?;
         Ok(())
     }
 
-    pub fn read_block(&mut self, id: Id) -> Result<[u8; BLOCK_SIZE], std::io::Error> {
+    pub fn read_block(&mut self, _id: Id) -> Result<[u8; BLOCK_SIZE], std::io::Error> {
+        let id = _id - 1;
         assert!((self.bitmap_block[(id / 8) as usize] & (1 << (id % 8))) != 0);
         self.block_io.read(id + 2)
     }
 
-    pub fn write_block(&mut self, id: Id, data: &[u8]) -> Result<(), std::io::Error> {
+    pub fn write_block(&mut self, _id: Id, data: &[u8]) -> Result<(), std::io::Error> {
+        let id = _id - 1;
         assert!((self.bitmap_block[(id / 8) as usize] & (1 << (id % 8))) != 0);
         self.block_io.write(id + 2, data)
     }
@@ -72,13 +77,14 @@ impl BlockMgr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use block_io::FakeMemBlockIO;
 
     #[test]
     fn test_new_del_blocks() -> Result<(), std::io::Error> {
         let mut block_mgr = BlockMgr::new(Box::new(FakeMemBlockIO::new()));
         let need_format = !block_mgr.is_formatted()?;
         block_mgr.init(need_format)?;
-        for i in 0 .. 32 {
+        for i in 1 .. 33 {
             let id = block_mgr.new_block()?;
             assert_eq!(id, i);
         }
