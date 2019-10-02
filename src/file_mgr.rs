@@ -1,67 +1,15 @@
-#[path="block_mgr.rs"]
-mod block_mgr;
+#[path="inode.rs"]
+mod inode;
 
-use std::convert::TryInto;
+use inode::*;
 
-use block_mgr::*;
-
-pub struct Inode {
-    id: Id,
-    dirty: bool,
-    data: [u8; BLOCK_SIZE],
-}
-
-const length_size: usize = std::mem::size_of::<u32>();
-const index_size: usize = std::mem::size_of::<Id>();
-
-/// For layout of each inode is like:
-/// [ length (u32) | block0 (Id) | block1 (Id) | ... ]
-impl Inode {
-
-    fn new(block_mgr: &mut BlockMgr, id: Id) -> Result<Inode, std::io::Error> {
-        Ok(Inode { id: id, dirty: false, data: block_mgr.read_block(id)? })
-    }
-
-    fn flush(&mut self, block_mgr: &mut BlockMgr) -> Result<(), std::io::Error> {
-        if self.dirty {
-            block_mgr.write_block(self.id, &self.data)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn length(&self) -> u32 {
-        u32::from_le_bytes(self.data[0 .. length_size].try_into().unwrap())
-    }
-
-    /// Set data block count. Need to flush manually later
-    fn set_length(&mut self, length: u32) {
-        self.data[0 .. length_size].copy_from_slice(&length.to_le_bytes());
-        self.dirty = true;
-    }
-
-    fn data_block(&self, index: usize) -> Id {
-        Id::from_le_bytes(
-            self.data[length_size + index * index_size .. length_size + (index + 1) * index_size]
-            .try_into().unwrap()
-        )
-    }
-
-    /// Set data block pointer. Need to flush manually later
-    fn set_data_block(&mut self, index: usize, data_block: Id) {
-        self.data[length_size + index * index_size .. length_size + (index + 1) * index_size]
-            .copy_from_slice(&data_block.to_le_bytes());
-        self.dirty = true;
-    }
-}
-
-pub struct InodeMgr {
+pub struct FileMgr {
     block_mgr: Box<BlockMgr>,
 }
 
-impl InodeMgr {
-    pub fn new(block_mgr: Box<BlockMgr>) -> InodeMgr {
-        InodeMgr { block_mgr: block_mgr }
+impl FileMgr {
+    pub fn new(block_mgr: Box<BlockMgr>) -> FileMgr {
+        FileMgr { block_mgr: block_mgr }
     }
 
     pub fn is_formatted(&mut self) -> Result<bool, std::io::Error> {
@@ -72,7 +20,7 @@ impl InodeMgr {
         self.block_mgr.init(need_format)?;
         if need_format {
             let root_inode = self.new_inode()?;
-            assert_eq!(root_inode.id, 0);
+            assert_eq!(root_inode.id(), 0);
         }
         Ok(())
     }
@@ -92,7 +40,7 @@ impl InodeMgr {
     }
 
     pub fn del_inode(&mut self, inode: &Inode) -> Result<(), std::io::Error> {
-        self.block_mgr.del_block(inode.id)
+        self.block_mgr.del_block(inode.id())
     }
 
     pub fn read_file(&mut self, inode: &Inode, offset: usize, count: usize)
@@ -237,10 +185,10 @@ impl InodeMgr {
 mod tests {
     use super::*;
 
-    fn init() -> Result<Box<InodeMgr>, std::io::Error> {
+    fn init() -> Result<Box<FileMgr>, std::io::Error> {
         let block_io = Box::new(FakeMemBlockIO::new());
         let block_mgr = Box::new(BlockMgr::new(block_io));
-        let mut inode_mgr = Box::new(InodeMgr::new(block_mgr));
+        let mut inode_mgr = Box::new(FileMgr::new(block_mgr));
         let need_format = !inode_mgr.is_formatted()?;
         inode_mgr.init(need_format)?;
         Ok(inode_mgr)
