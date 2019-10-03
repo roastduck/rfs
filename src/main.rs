@@ -153,6 +153,41 @@ impl Rfs {
         Ok((attr, generation))
     }
 
+    fn unlink_impl(&mut self, _req: &fuse::Request, parent: &mut Inode, _name: &std::ffi::OsStr) -> Result<(), std::io::Error> {
+        let mut offset: usize = 0;
+        let mut inode = loop {
+            let item = self.file_mgr.read_file(parent, offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
+            if item.is_empty() {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+            }
+            let (ino, name) = Rfs::parse_dir_item(&item);
+            if name == _name {
+                break self.open_impl(_req, ino as u64, 0)?;
+            }
+            offset += 1;
+        };
+
+        if inode.kind()? == fuse::FileType::Directory && inode.length() as usize > 2 * DIR_ITEM_SIZE { // 2 = "." + ".."
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
+        }
+
+        let last_offset = parent.length() as usize / DIR_ITEM_SIZE - 1;
+        if offset < last_offset {
+            let last_item = self.file_mgr.read_file(parent, last_offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
+            self.file_mgr.write_file(parent, offset * DIR_ITEM_SIZE, &last_item[..])?;
+        }
+        self.file_mgr.truncate_file(parent, parent.length() as usize - DIR_ITEM_SIZE)?;
+
+        let nlink = inode.nlink() - 1;
+        if nlink > 0 {
+            inode.set_nlink(nlink);
+            self.file_mgr.flush(&mut inode)?;
+        } else {
+            self.file_mgr.del_inode(&mut inode)?;
+        }
+        Ok(())
+    }
+
     fn read_impl(&mut self, _req: &fuse::Request, inode: &Inode, _offset: i64, _size: u32)
             -> Result<Vec<u8>, std::io::Error> {
         if _offset < 0 {
@@ -290,6 +325,17 @@ impl fuse::Filesystem for Rfs {
         }
     }
 
+    fn unlink(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
+        match self.open_impl(_req, _parent, 0) {
+            Ok(mut parent) => if let Err(err) = self.unlink_impl(_req, &mut parent, _name) {
+                reply.error(err.raw_os_error().unwrap())
+            } else {
+                reply.ok()
+            },
+            Err(err) => reply.error(err.raw_os_error().unwrap())
+        }
+    }
+
     fn open(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
         match self.open_impl(_req, _ino, _flags) {
             Ok(inode) => reply.opened(Box::into_raw(inode) as u64, _flags),
@@ -337,6 +383,17 @@ impl fuse::Filesystem for Rfs {
             Ok(mut parent) => match self.mkdir_impl(_req, &mut parent, _name, _mode as u16) {
                 Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
                 Err(err) => reply.error(err.raw_os_error().unwrap())
+            },
+            Err(err) => reply.error(err.raw_os_error().unwrap())
+        }
+    }
+
+    fn rmdir(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
+        match self.open_impl(_req, _parent, 0) {
+            Ok(mut parent) => if let Err(err) = self.unlink_impl(_req, &mut parent, _name) {
+                reply.error(err.raw_os_error().unwrap())
+            } else {
+                reply.ok()
             },
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
