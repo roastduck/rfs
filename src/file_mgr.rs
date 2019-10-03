@@ -110,8 +110,7 @@ impl FileMgr {
         Ok(ret)
     }
 
-    fn write_file_impl(&mut self, inode: &mut Inode, offset: usize, data: &[u8], write_cnt: &mut usize)
-                        -> Result<(), std::io::Error> {
+    pub fn write_file(&mut self, inode: &mut Inode, offset: usize, data: &[u8]) -> Result<usize, std::io::Error> {
         let start = offset;
         let end = start + data.len();
 
@@ -127,14 +126,15 @@ impl FileMgr {
             };
             block[start % BLOCK_SIZE .. end % BLOCK_SIZE].copy_from_slice(data);
             self.block_mgr.write_block(id, &block)?;
-            *write_cnt = data.len();
-            inode.set_length(std::cmp::max(inode.length(), (offset + *write_cnt) as u32));
-            return Ok(())
+            inode.set_length(std::cmp::max(inode.length(), (offset + data.len()) as u32));
+
+            inode.flush(&mut*self.block_mgr)?;
+            return Ok(data.len())
         }
 
         let start_block = (start + BLOCK_SIZE - 1) / BLOCK_SIZE; // First full block
         let end_block = end / BLOCK_SIZE; // Last full block
-        *write_cnt = 0;
+        let mut write_cnt = 0;
         if start % BLOCK_SIZE != 0 {
             let mut id = inode.data_block(start_block - 1);
             let mut block = if id == 0 {
@@ -146,8 +146,8 @@ impl FileMgr {
             };
             block[start % BLOCK_SIZE ..].copy_from_slice(&data[.. BLOCK_SIZE - start % BLOCK_SIZE]);
             self.block_mgr.write_block(id, &block)?;
-            *write_cnt += BLOCK_SIZE - start % BLOCK_SIZE;
-            inode.set_length(std::cmp::max(inode.length(), (offset + *write_cnt) as u32))
+            write_cnt += BLOCK_SIZE - start % BLOCK_SIZE;
+            inode.set_length(std::cmp::max(inode.length(), (offset + write_cnt) as u32))
         }
         for i in start_block .. end_block {
             let mut id = inode.data_block(i);
@@ -155,9 +155,9 @@ impl FileMgr {
                 id = self.block_mgr.new_block()?;
                 inode.set_data_block(i, id);
             }
-            self.block_mgr.write_block(id, &data[*write_cnt .. *write_cnt + BLOCK_SIZE])?;
-            *write_cnt += BLOCK_SIZE;
-            inode.set_length(std::cmp::max(inode.length(), (offset + *write_cnt) as u32))
+            self.block_mgr.write_block(id, &data[write_cnt .. write_cnt + BLOCK_SIZE])?;
+            write_cnt += BLOCK_SIZE;
+            inode.set_length(std::cmp::max(inode.length(), (offset + write_cnt) as u32))
         }
         if end % BLOCK_SIZE != 0 {
             let mut id = inode.data_block(end_block);
@@ -168,27 +168,14 @@ impl FileMgr {
             } else {
                 self.block_mgr.read_block(id)?
             };
-            block[.. end % BLOCK_SIZE].copy_from_slice(&data[*write_cnt ..]);
+            block[.. end % BLOCK_SIZE].copy_from_slice(&data[write_cnt ..]);
             self.block_mgr.write_block(id, &block)?;
-            *write_cnt += end % BLOCK_SIZE;
-            inode.set_length(std::cmp::max(inode.length(), (offset + *write_cnt) as u32))
+            write_cnt += end % BLOCK_SIZE;
+            inode.set_length(std::cmp::max(inode.length(), (offset + write_cnt) as u32))
         }
-        assert_eq!(*write_cnt, data.len());
-        Ok(())
-    }
+        assert_eq!(write_cnt, data.len());
 
-    pub fn write_file(&mut self, inode: &mut Inode, offset: usize, data: &[u8])
-                       -> Result<usize, std::io::Error> {
-        let mut write_cnt = 0;
-        let result = self.write_file_impl(inode, offset, data, &mut write_cnt);
         inode.flush(&mut*self.block_mgr)?;
-        if let Err(error) = result {
-            if let Some(errno) = error.raw_os_error() {
-                if errno != libc::ENOSPC {
-                    return Err(error)
-                }
-            }
-        }
         Ok(write_cnt)
     }
 
