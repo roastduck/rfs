@@ -32,10 +32,10 @@ const MTIME_SIZE: usize = std::mem::size_of::<i64>() + std::mem::size_of::<i32>(
 const CTIME_OFF: usize = MTIME_OFF + MTIME_SIZE;
 const CTIME_SIZE: usize = std::mem::size_of::<i64>() + std::mem::size_of::<i32>(); // sec + nsec
 
-const TYPE_PERM_OFF: usize = CTIME_OFF + CTIME_SIZE;
-const TYPE_PERM_SIZE: usize = std::mem::size_of::<u16>();
+const MODE_OFF: usize = CTIME_OFF + CTIME_SIZE;
+const MODE_SIZE: usize = std::mem::size_of::<u16>();
 
-const NLINK_OFF: usize = TYPE_PERM_OFF + TYPE_PERM_SIZE;
+const NLINK_OFF: usize = MODE_OFF + MODE_SIZE;
 const NLINK_SIZE: usize = std::mem::size_of::<u16>();
 
 const UID_OFF: usize = NLINK_OFF + NLINK_SIZE;
@@ -121,37 +121,23 @@ impl Inode {
     }
 
     pub fn kind(&self) -> Result<fuse::FileType, std::io::Error> {
-        let type_perm = u16::from_le_bytes(self.data[TYPE_PERM_OFF .. TYPE_PERM_OFF + TYPE_PERM_SIZE].try_into().unwrap());
-        match type_perm >> 12 {
-            0 => Ok(fuse::FileType::RegularFile),
-            1 => Ok(fuse::FileType::Directory),
-            2 => Ok(fuse::FileType::Symlink),
+        let mode = u16::from_le_bytes(self.data[MODE_OFF .. MODE_OFF + MODE_SIZE].try_into().unwrap());
+        match mode as u32 & libc::S_IFMT {
+            libc::S_IFREG => Ok(fuse::FileType::RegularFile),
+            libc::S_IFDIR => Ok(fuse::FileType::Directory),
+            libc::S_IFLNK => Ok(fuse::FileType::Symlink),
             _ => Err(std::io::Error::from_raw_os_error(libc::EINVAL))
         }
     }
 
-    pub fn set_kind(&mut self, kind: fuse::FileType) -> Result<(), std::io::Error> {
-        let mut type_perm = u16::from_le_bytes(self.data[TYPE_PERM_OFF .. TYPE_PERM_OFF + TYPE_PERM_SIZE].try_into().unwrap());
-        type_perm = (type_perm & 0x0fff) | (match kind {
-            fuse::FileType::RegularFile => 0,
-            fuse::FileType::Directory => 1,
-            fuse::FileType::Symlink => 2,
-            _ => return Err(std::io::Error::from_raw_os_error(libc::EINVAL))
-        } << 12);
-        self.data[TYPE_PERM_OFF .. TYPE_PERM_OFF + TYPE_PERM_SIZE].copy_from_slice(&type_perm.to_le_bytes());
-        self.dirty = true;
-        Ok(())
-    }
-
     pub fn perm(&self) -> u16 {
-        let type_perm = u16::from_le_bytes(self.data[TYPE_PERM_OFF .. TYPE_PERM_OFF + TYPE_PERM_SIZE].try_into().unwrap());
-        type_perm & 0x0fff
+        let mode = u16::from_le_bytes(self.data[MODE_OFF .. MODE_OFF + MODE_SIZE].try_into().unwrap());
+        mode & 0x0fff
     }
 
-    pub fn set_perm(&mut self, perm: u16) {
-        let mut type_perm = u16::from_le_bytes(self.data[TYPE_PERM_OFF .. TYPE_PERM_OFF + TYPE_PERM_SIZE].try_into().unwrap());
-        type_perm = (type_perm & 0xf000) | perm;
-        self.data[TYPE_PERM_OFF .. TYPE_PERM_OFF + TYPE_PERM_SIZE].copy_from_slice(&type_perm.to_le_bytes());
+    // Set kind and perm together
+    pub fn set_mode(&mut self, mode: u16) {
+        self.data[MODE_OFF .. MODE_OFF + MODE_SIZE].copy_from_slice(&mode.to_le_bytes());
         self.dirty = true;
     }
 
