@@ -67,6 +67,16 @@ impl FileMgr {
         let mut ret = vec![];
         ret.reserve(end - start);
 
+        if start / BLOCK_SIZE == end / BLOCK_SIZE {
+            let id = inode.data_block(start / BLOCK_SIZE);
+            if id > 0 {
+                let block = self.block_mgr.read_block(id)?;
+                return Ok(Vec::from(&block[start % BLOCK_SIZE .. end % BLOCK_SIZE]));
+            } else {
+                return Ok(vec![0; end - start]);
+            }
+        }
+
         let start_block = (start + BLOCK_SIZE - 1) / BLOCK_SIZE; // First full block
         let end_block = end / BLOCK_SIZE; // Last full block
         if start % BLOCK_SIZE != 0 {
@@ -104,9 +114,26 @@ impl FileMgr {
                         -> Result<(), std::io::Error> {
         let start = offset;
         let end = start + data.len();
+
+        if start / BLOCK_SIZE == end / BLOCK_SIZE {
+            let blkno = start / BLOCK_SIZE;
+            let mut id = inode.data_block(blkno);
+            let mut block = if id == 0 {
+                id = self.block_mgr.new_block()?;
+                inode.set_data_block(blkno, id);
+                [0; BLOCK_SIZE]
+            } else {
+                self.block_mgr.read_block(id)?
+            };
+            block[start % BLOCK_SIZE .. end % BLOCK_SIZE].copy_from_slice(data);
+            self.block_mgr.write_block(id, &block)?;
+            *write_cnt = data.len();
+            inode.set_length(std::cmp::max(inode.length(), (offset + *write_cnt) as u32));
+            return Ok(())
+        }
+
         let start_block = (start + BLOCK_SIZE - 1) / BLOCK_SIZE; // First full block
         let end_block = end / BLOCK_SIZE; // Last full block
-
         *write_cnt = 0;
         if start % BLOCK_SIZE != 0 {
             let mut id = inode.data_block(start_block - 1);
@@ -209,6 +236,26 @@ mod tests {
         let need_format = !inode_mgr.is_formatted()?;
         inode_mgr.init(need_format)?;
         Ok(inode_mgr)
+    }
+
+    #[test]
+    fn test_write_inside_1_block() -> Result<(), std::io::Error> {
+        let mut inode_mgr = init()?;
+        let mut inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&mut inode, 5, &[1, 2, 3, 4, 5])?;
+        let file_read = inode_mgr.read_file(&inode, 0, BLOCK_SIZE)?;
+        assert_eq!(file_read, [0, 0, 0, 0, 0, 1, 2, 3, 4, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_inside_1_block() -> Result<(), std::io::Error> {
+        let mut inode_mgr = init()?;
+        let mut inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&mut inode, 0, &[0, 0, 0, 0, 0, 1, 2, 3, 4, 5])?;
+        let file_read = inode_mgr.read_file(&mut inode, 5, 5)?;
+        assert_eq!(file_read, [1, 2, 3, 4, 5]);
+        Ok(())
     }
 
     #[test]
