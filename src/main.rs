@@ -497,6 +497,14 @@ impl fuse::Filesystem for Rfs {
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
+
+    fn listxattr(&mut self, _req: &fuse::Request, _ino: u64, _size: u32, reply: fuse::ReplyXattr) {
+        if _size == 0 {
+            reply.size(0);
+        } else {
+            reply.data(&[]);
+        }
+    }
 }
 
 fn main() -> Result<(), std::io::Error> {
