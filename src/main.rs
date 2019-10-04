@@ -71,26 +71,8 @@ impl Rfs {
         self.file_mgr.flush(inode)
     }
 
-    fn link_with_nlink_unchanged(&mut self, id: Id, newparent: &Inode, _newname: &std::ffi::OsStr)
-                                 -> Result<(), std::io::Error> {
-        let item = Rfs::assemby_dir_itme(id, _newname)?;
-        let end_of_file = newparent.length() as usize;
-        self.file_mgr.write_file(newparent, end_of_file, &item)?;
-        Ok(())
-    }
-
-    fn init_impl(&mut self, _req: &fuse::Request) -> Result<(), std::io::Error> {
-        let need_format = !self.file_mgr.is_formatted()?;
-        self.file_mgr.init(need_format)?;
-        let root = self.file_mgr.read_root_inode()?;
-        self.set_newly_created(_req, &root, 0o040755)?;
-        self.link_with_nlink_unchanged(root.id(), &root, &std::ffi::OsString::from("."))?;
-        self.link_with_nlink_unchanged(root.id(), &root, &std::ffi::OsString::from(".."))?;
-        Ok(())
-    }
-
-    fn lookup_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr)
-                   -> Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
+    fn lookup_item(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr)
+                   -> Result<(usize /* offset */, Id), std::io::Error> {
         let mut offset: usize = 0;
         loop {
             let item = self.file_mgr.read_file(parent, offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
@@ -99,13 +81,46 @@ impl Rfs {
             }
             let (ino, name) = Rfs::parse_dir_item(&item);
             if name == _name {
-                let inode = self.open_impl(_req, ino as u64, 0)?;
-                let attr = self.getattr_impl(_req, &inode)?;
-                let generation = inode.generation();
-                break Ok((attr, generation))
+                break Ok((offset, ino))
             }
             offset += 1;
         }
+    }
+
+    fn write_dir_item(&mut self, id: Id, newparent: &Inode, _newname: &std::ffi::OsStr)
+                                 -> Result<(), std::io::Error> {
+        let item = Rfs::assemby_dir_itme(id, _newname)?;
+        let end_of_file = newparent.length() as usize;
+        self.file_mgr.write_file(newparent, end_of_file, &item)?;
+        Ok(())
+    }
+
+    fn erase_dir_item(&mut self, parent: &Inode, offset: usize) -> Result<(), std::io::Error> {
+        let last_offset = parent.length() as usize / DIR_ITEM_SIZE - 1;
+        if offset < last_offset {
+            let last_item = self.file_mgr.read_file(parent, last_offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
+            self.file_mgr.write_file(parent, offset * DIR_ITEM_SIZE, &last_item[..])?;
+        }
+        self.file_mgr.truncate_file(parent, parent.length() as usize - DIR_ITEM_SIZE)
+    }
+
+    fn init_impl(&mut self, _req: &fuse::Request) -> Result<(), std::io::Error> {
+        let need_format = !self.file_mgr.is_formatted()?;
+        self.file_mgr.init(need_format)?;
+        let root = self.file_mgr.read_root_inode()?;
+        self.set_newly_created(_req, &root, 0o040755)?;
+        self.write_dir_item(root.id(), &root, &std::ffi::OsString::from("."))?;
+        self.write_dir_item(root.id(), &root, &std::ffi::OsString::from(".."))?;
+        Ok(())
+    }
+
+    fn lookup_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr)
+                   -> Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
+        let ino = self.lookup_item(_req, parent, _name)?.1;
+        let inode = self.open_impl(_req, ino as u64, 0)?;
+        let attr = self.getattr_impl(_req, &inode)?;
+        let generation = inode.generation();
+        Ok((attr, generation))
     }
 
     fn getattr_impl(&mut self, _req: &fuse::Request, inode: &Inode) -> Result<fuse::FileAttr, std::io::Error> {
@@ -149,35 +164,18 @@ impl Rfs {
         self.file_mgr.flush(inode)?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
-        self.link_with_nlink_unchanged(inode.id(), newparent, _newname)?;
+        self.write_dir_item(inode.id(), newparent, _newname)?;
         Ok((attr, generation))
     }
 
     fn unlink_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr) -> Result<(), std::io::Error> {
-        let mut offset: usize = 0;
-        let inode = loop {
-            let item = self.file_mgr.read_file(parent, offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
-            if item.is_empty() {
-                return Err(std::io::Error::from_raw_os_error(libc::ENOENT))
-            }
-            let (ino, name) = Rfs::parse_dir_item(&item);
-            if name == _name {
-                break self.open_impl(_req, ino as u64, 0)?;
-            }
-            offset += 1;
-        };
-
+        let (offset, ino) = self.lookup_item(_req, parent, _name)?;
+        let inode = self.open_impl(_req, ino as u64, 0)?;
         if inode.kind()? == fuse::FileType::Directory && inode.length() as usize > 2 * DIR_ITEM_SIZE { // 2 = "." + ".."
             return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
         }
 
-        let last_offset = parent.length() as usize / DIR_ITEM_SIZE - 1;
-        if offset < last_offset {
-            let last_item = self.file_mgr.read_file(parent, last_offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
-            self.file_mgr.write_file(parent, offset * DIR_ITEM_SIZE, &last_item[..])?;
-        }
-        self.file_mgr.truncate_file(parent, parent.length() as usize - DIR_ITEM_SIZE)?;
-
+        self.erase_dir_item(parent, offset)?;
         let nlink = inode.nlink() - 1;
         if nlink > 0 {
             inode.set_nlink(nlink);
@@ -186,6 +184,16 @@ impl Rfs {
             self.file_mgr.del_inode(&inode)?;
         }
         Ok(())
+    }
+
+    fn rename_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr, newparent: &Inode, _newname: &std::ffi::OsStr)
+                   -> Result<(), std::io::Error> {
+        let (offset, ino) = self.lookup_item(_req, parent, _name)?;
+        self.erase_dir_item(parent, offset)?; // This goes first, in case parent == newparent
+        if let Ok((overwritten_offset, _)) = self.lookup_item(_req, newparent, _newname) {
+            self.erase_dir_item(newparent, overwritten_offset)?;
+        }
+        self.write_dir_item(ino, newparent, _newname)
     }
 
     fn read_impl(&mut self, _req: &fuse::Request, inode: &Inode, _offset: i64, _size: u32)
@@ -208,8 +216,8 @@ impl Rfs {
                   -> Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
         let inode = self.file_mgr.new_inode()?;
         self.set_newly_created(_req, &inode, libc::S_IFDIR as u16 | (0o7777 &_mode))?;
-        self.link_with_nlink_unchanged(inode.id(), &inode, &std::ffi::OsString::from("."))?;
-        self.link_with_nlink_unchanged(parent.id(), &inode, &std::ffi::OsString::from(".."))?;
+        self.write_dir_item(inode.id(), &inode, &std::ffi::OsString::from("."))?;
+        self.write_dir_item(parent.id(), &inode, &std::ffi::OsString::from(".."))?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
 
@@ -331,6 +339,22 @@ impl fuse::Filesystem for Rfs {
                 reply.error(err.raw_os_error().unwrap())
             } else {
                 reply.ok()
+            },
+            Err(err) => reply.error(err.raw_os_error().unwrap())
+        }
+    }
+
+    fn rename(
+        &mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _newparent: u64,
+        _newname: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
+        match self.open_impl(_req, _parent, 0) {
+            Ok(parent) => match self.open_impl(_req, _newparent, 0) {
+                Ok(newparent) => if let Err(err) = self.rename_impl(_req, &parent, _name, &newparent, _newname) {
+                    reply.error(err.raw_os_error().unwrap())
+                } else {
+                    reply.ok()
+                },
+                Err(err) => reply.error(err.raw_os_error().unwrap())
             },
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
