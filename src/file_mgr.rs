@@ -191,9 +191,9 @@ impl FileMgr {
 
     pub fn truncate_file(&mut self, inode: &Inode, length: usize) -> Result<(), std::io::Error> {
         if length < inode.length() as usize {
-            let block_cnt = (length + BLOCK_SIZE - 1) / BLOCK_SIZE - 1;
+            let block_cnt_plus_one = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
             let old_block_cnt = (inode.length() as usize + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            for i in block_cnt + 1 .. old_block_cnt {
+            for i in block_cnt_plus_one .. old_block_cnt {
                 let id = inode.data_block(i);
                 if id > 0 {
                     inode.set_data_block(i, 0);

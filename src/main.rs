@@ -43,7 +43,7 @@ impl Rfs {
         (ino, std::ffi::OsString::from(name))
     }
 
-    fn assemby_dir_itme(ino: Id, name: &std::ffi::OsStr) -> Result<[u8; DIR_ITEM_SIZE], std::io::Error> {
+    fn assembly_dir_itme(ino: Id, name: &std::ffi::OsStr) -> Result<[u8; DIR_ITEM_SIZE], std::io::Error> {
         let name_str = name.to_string_lossy();
         let name_bytes = name_str.as_bytes();
         if name_bytes.len() > MAX_NAME_LEN {
@@ -89,7 +89,7 @@ impl Rfs {
 
     fn write_dir_item(&mut self, id: Id, newparent: &Inode, _newname: &std::ffi::OsStr)
                                  -> Result<(), std::io::Error> {
-        let item = Rfs::assemby_dir_itme(id, _newname)?;
+        let item = Rfs::assembly_dir_itme(id, _newname)?;
         let end_of_file = newparent.length() as usize;
         self.file_mgr.write_file(newparent, end_of_file, &item)?;
         Ok(())
@@ -196,6 +196,24 @@ impl Rfs {
         self.write_dir_item(ino, newparent, _newname)
     }
 
+    fn symlink_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr, _link: &std::path::Path)
+               ->Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
+        let inode = self.file_mgr.new_inode()?;
+        self.set_newly_created(_req, &inode, libc::S_IFLNK as u16 | 0o0777)?;
+        let attr = self.getattr_impl(_req, &inode)?;
+        let generation = inode.generation();
+        self.write_dir_item(inode.id(), parent, _name)?;
+
+        let _bytes = _link.to_string_lossy();
+        let bytes = _bytes.as_bytes();
+        // readlink returns &[u8], so here we'd better represent OsStr as bytes directly. However,
+        // OsStr cannot be converted to bytes. Since fuse is only supported on Linux and OSX, it's
+        // fine though.
+        self.file_mgr.truncate_file(&inode, bytes.len())?;
+        self.file_mgr.write_file(&inode, 0, bytes)?;
+        Ok((attr, generation))
+    }
+
     fn read_impl(&mut self, _req: &fuse::Request, inode: &Inode, _offset: i64, _size: u32)
             -> Result<Vec<u8>, std::io::Error> {
         if _offset < 0 {
@@ -220,10 +238,7 @@ impl Rfs {
         self.write_dir_item(parent.id(), &inode, &std::ffi::OsString::from(".."))?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
-
-        let item = Rfs::assemby_dir_itme(inode.id(), _name)?;
-        let end_of_file = parent.length() as usize;
-        self.file_mgr.write_file(parent, end_of_file, &item)?;
+        self.write_dir_item(inode.id(), parent, _name)?;
         Ok((attr, generation))
     }
 
@@ -261,10 +276,7 @@ impl Rfs {
         self.set_newly_created(_req, &inode, libc::S_IFREG as u16 | (0o7777 &_mode))?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
-
-        let item = Rfs::assemby_dir_itme(inode.id(), _name)?;
-        let end_of_file = parent.length() as usize;
-        self.file_mgr.write_file(parent, end_of_file, &item)?;
+        self.write_dir_item(inode.id(), parent, _name)?;
         Ok((inode, attr, generation))
     }
 }
@@ -355,6 +367,29 @@ impl fuse::Filesystem for Rfs {
                     reply.ok()
                 },
                 Err(err) => reply.error(err.raw_os_error().unwrap())
+            },
+            Err(err) => reply.error(err.raw_os_error().unwrap())
+        }
+    }
+
+    fn symlink(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _link: &std::path::Path, reply: fuse::ReplyEntry) {
+        match self.open_impl(_req, _parent, 0) {
+            Ok(parent) => match self.symlink_impl(_req, &parent, _name, _link) {
+                Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
+                Err(err) => reply.error(err.raw_os_error().unwrap())
+            },
+            Err(err) => reply.error(err.raw_os_error().unwrap())
+        }
+    }
+
+    fn readlink(&mut self, _req: &fuse::Request, _ino: u64, reply: fuse::ReplyData) {
+        match self.open_impl(_req, _ino, 0) {
+            Ok(inode) => {
+                let len = inode.length();
+                match self.read_impl(_req, &inode, 0, len) {
+                    Ok(data) => reply.data(&data[..]),
+                    Err(err) => reply.error(err.raw_os_error().unwrap())
+                }
             },
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
