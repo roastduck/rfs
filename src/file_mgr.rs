@@ -10,13 +10,18 @@ use inode::*;
 use block_io::{Id, BLOCK_SIZE};
 use block_mgr::BlockMgr;
 
+const INODE_TALBE_SIZE: usize = Id::max_value() as usize + 1;
+
 pub struct FileMgr {
     block_mgr: Box<BlockMgr>,
+    inode_table: Vec<std::rc::Weak<Inode>>,
 }
 
 impl FileMgr {
     pub fn new(block_mgr: Box<BlockMgr>) -> FileMgr {
-        FileMgr { block_mgr: block_mgr }
+        let mut obj = FileMgr { block_mgr: block_mgr, inode_table: Vec:: new() };
+        obj.inode_table.resize_with(INODE_TALBE_SIZE, || std::rc::Weak::new());
+        obj
     }
 
     pub fn is_formatted(&mut self) -> Result<bool, std::io::Error> {
@@ -32,7 +37,7 @@ impl FileMgr {
         Ok(())
     }
 
-    pub fn new_inode(&mut self) -> Result<Inode, std::io::Error> {
+    pub fn new_inode(&mut self) -> Result<std::rc::Rc<Inode>, std::io::Error> {
         let id = self.block_mgr.new_block()?;
         let mut block = self.block_mgr.read_block(id)?;
         let mut generation = u64::from_le_bytes(block[0 .. 8].try_into().unwrap());
@@ -40,14 +45,19 @@ impl FileMgr {
         block[0 .. 8].copy_from_slice(&generation.to_le_bytes());
         block[8 ..].copy_from_slice(&[0; BLOCK_SIZE - 8]);
         self.block_mgr.write_block(id, &block)?;
-        Inode::new(&mut*self.block_mgr, id)
+        self.read_inode(id)
     }
 
-    pub fn read_inode(&mut self, id: Id) -> Result<Inode, std::io::Error> {
-        Inode::new(&mut*self.block_mgr, id)
+    pub fn read_inode(&mut self, id: Id) -> Result<std::rc::Rc<Inode>, std::io::Error> {
+        if let Some(inode) = self.inode_table[id as usize - 1].upgrade() {
+            return Ok(inode)
+        }
+        let inode = std::rc::Rc::new(Inode::new(&mut*self.block_mgr, id)?);
+        self.inode_table[id as usize - 1] = std::rc::Rc::downgrade(&inode);
+        Ok(inode)
     }
 
-    pub fn read_root_inode(&mut self) -> Result<Inode, std::io::Error> {
+    pub fn read_root_inode(&mut self) -> Result<std::rc::Rc<Inode>, std::io::Error> {
         self.read_inode(1)
     }
 
@@ -110,7 +120,7 @@ impl FileMgr {
         Ok(ret)
     }
 
-    pub fn write_file(&mut self, inode: &mut Inode, offset: usize, data: &[u8]) -> Result<usize, std::io::Error> {
+    pub fn write_file(&mut self, inode: &Inode, offset: usize, data: &[u8]) -> Result<usize, std::io::Error> {
         let start = offset;
         let end = start + data.len();
 
@@ -179,7 +189,7 @@ impl FileMgr {
         Ok(write_cnt)
     }
 
-    pub fn truncate_file(&mut self, inode: &mut Inode, length: usize) -> Result<(), std::io::Error> {
+    pub fn truncate_file(&mut self, inode: &Inode, length: usize) -> Result<(), std::io::Error> {
         if length < inode.length() as usize {
             let block_cnt = (length + BLOCK_SIZE - 1) / BLOCK_SIZE - 1;
             let old_block_cnt = (inode.length() as usize + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -206,7 +216,7 @@ impl FileMgr {
         inode.flush(&mut*self.block_mgr)
     }
 
-    pub fn flush(&mut self, inode: &mut Inode) -> Result<(), std::io::Error> {
+    pub fn flush(&mut self, inode: &Inode) -> Result<(), std::io::Error> {
         inode.flush(&mut*self.block_mgr)
     }
 }
@@ -228,8 +238,8 @@ mod tests {
     #[test]
     fn test_write_inside_1_block() -> Result<(), std::io::Error> {
         let mut inode_mgr = init()?;
-        let mut inode = inode_mgr.read_root_inode()?;
-        inode_mgr.write_file(&mut inode, 5, &[1, 2, 3, 4, 5])?;
+        let inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&inode, 5, &[1, 2, 3, 4, 5])?;
         let file_read = inode_mgr.read_file(&inode, 0, BLOCK_SIZE)?;
         assert_eq!(file_read, [0, 0, 0, 0, 0, 1, 2, 3, 4, 5]);
         Ok(())
@@ -238,9 +248,9 @@ mod tests {
     #[test]
     fn test_read_inside_1_block() -> Result<(), std::io::Error> {
         let mut inode_mgr = init()?;
-        let mut inode = inode_mgr.read_root_inode()?;
-        inode_mgr.write_file(&mut inode, 0, &[0, 0, 0, 0, 0, 1, 2, 3, 4, 5])?;
-        let file_read = inode_mgr.read_file(&mut inode, 5, 5)?;
+        let inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&inode, 0, &[0, 0, 0, 0, 0, 1, 2, 3, 4, 5])?;
+        let file_read = inode_mgr.read_file(&inode, 5, 5)?;
         assert_eq!(file_read, [1, 2, 3, 4, 5]);
         Ok(())
     }
@@ -253,10 +263,10 @@ mod tests {
             file.push((i % 256) as u8)
         }
 
-        let mut inode = inode_mgr.read_root_inode()?;
-        inode_mgr.write_file(&mut inode, 0, &file[0 .. 2000])?;
-        inode_mgr.write_file(&mut inode, 2000, &file[2000 .. 8000])?;
-        inode_mgr.write_file(&mut inode, 8000, &file[8000 .. 10000])?;
+        let inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&inode, 0, &file[0 .. 2000])?;
+        inode_mgr.write_file(&inode, 2000, &file[2000 .. 8000])?;
+        inode_mgr.write_file(&inode, 8000, &file[8000 .. 10000])?;
         let file_read = inode_mgr.read_file(&inode, 0, 10000)?;
         assert_eq!(file_read, file);
         Ok(())
@@ -270,8 +280,8 @@ mod tests {
             file.push((i % 256) as u8)
         }
 
-        let mut inode = inode_mgr.read_root_inode()?;
-        inode_mgr.write_file(&mut inode, 0, &file[..])?;
+        let inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&inode, 0, &file[..])?;
         let read0 = inode_mgr.read_file(&inode, 0, 2000)?;
         assert_eq!(read0[..], file[0 .. 2000]);
         let read1 = inode_mgr.read_file(&inode, 2000, 6000)?;
@@ -289,8 +299,8 @@ mod tests {
             file.push((i % 256) as u8)
         }
 
-        let mut inode = inode_mgr.read_root_inode()?;
-        inode_mgr.write_file(&mut inode, 6000, &file[..])?;
+        let inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&inode, 6000, &file[..])?;
         let file_read = inode_mgr.read_file(&inode, 0, 9000)?;
         assert_eq!(file_read[.. 6000], [0; 6000][..]);
         assert_eq!(file_read[6000 ..], file[..]);
@@ -305,13 +315,25 @@ mod tests {
             file.push((i % 256) as u8)
         }
 
-        let mut inode = inode_mgr.read_root_inode()?;
-        inode_mgr.write_file(&mut inode, 0, &file[..])?;
-        inode_mgr.truncate_file(&mut inode, 6000)?;
-        inode_mgr.truncate_file(&mut inode, 10000)?;
+        let inode = inode_mgr.read_root_inode()?;
+        inode_mgr.write_file(&inode, 0, &file[..])?;
+        inode_mgr.truncate_file(&inode, 6000)?;
+        inode_mgr.truncate_file(&inode, 10000)?;
         let file_read = inode_mgr.read_file(&inode, 0, 999999)?;
         assert_eq!(file_read[.. 6000], file[.. 6000]);
         assert_eq!(file_read[6000 ..], [0; 4000][..]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_share_inode() -> Result<(), std::io::Error> {
+        let mut inode_mgr = init()?;
+        let inode_a = inode_mgr.read_root_inode()?;
+        let inode_b = inode_mgr.read_root_inode()?;
+        inode_a.set_uid(1);
+        inode_b.set_uid(2);
+        assert_eq!(inode_a.uid(), inode_b.uid());
+        inode_mgr.flush(&inode_a)?;
         Ok(())
     }
 }

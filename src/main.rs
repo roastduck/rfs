@@ -58,7 +58,7 @@ impl Rfs {
         Ok(ret)
     }
 
-    fn set_newly_created(&mut self, _req: &fuse::Request, inode: &mut Inode, mode: u16)
+    fn set_newly_created(&mut self, _req: &fuse::Request, inode: &Inode, mode: u16)
                         -> Result<(), std::io::Error> {
         let now = time::now_utc().to_timespec();
         inode.set_atime(now);
@@ -71,7 +71,7 @@ impl Rfs {
         self.file_mgr.flush(inode)
     }
 
-    fn link_with_nlink_unchanged(&mut self, id: Id, newparent: &mut Inode,_newname: &std::ffi::OsStr)
+    fn link_with_nlink_unchanged(&mut self, id: Id, newparent: &Inode, _newname: &std::ffi::OsStr)
                                  -> Result<(), std::io::Error> {
         let item = Rfs::assemby_dir_itme(id, _newname)?;
         let end_of_file = newparent.length() as usize;
@@ -82,10 +82,10 @@ impl Rfs {
     fn init_impl(&mut self, _req: &fuse::Request) -> Result<(), std::io::Error> {
         let need_format = !self.file_mgr.is_formatted()?;
         self.file_mgr.init(need_format)?;
-        let mut root = self.file_mgr.read_root_inode()?;
-        self.set_newly_created(_req, &mut root, 0o040755)?;
-        self.link_with_nlink_unchanged(root.id(), &mut root, &std::ffi::OsString::from("."))?;
-        self.link_with_nlink_unchanged(root.id(), &mut root, &std::ffi::OsString::from(".."))?;
+        let root = self.file_mgr.read_root_inode()?;
+        self.set_newly_created(_req, &root, 0o040755)?;
+        self.link_with_nlink_unchanged(root.id(), &root, &std::ffi::OsString::from("."))?;
+        self.link_with_nlink_unchanged(root.id(), &root, &std::ffi::OsString::from(".."))?;
         Ok(())
     }
 
@@ -128,7 +128,7 @@ impl Rfs {
     }
 
     fn setattr_impl(
-        &mut self, _req: &fuse::Request, inode: &mut Inode, _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>,
+        &mut self, _req: &fuse::Request, inode: &Inode, _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>,
         _size: Option<u64>, _atime: Option<time::Timespec>, _mtime: Option<time::Timespec>, _crtime: Option<time::Timespec>,
         _chgtime: Option<time::Timespec>, _bkuptime: Option<time::Timespec>, _flags: Option<u32>
     ) -> Result<fuse::FileAttr, std::io::Error> {
@@ -143,7 +143,7 @@ impl Rfs {
         self.getattr_impl(_req, &inode)
     }
 
-    fn link_impl(&mut self, _req: &fuse::Request, inode: &mut Inode, newparent: &mut Inode, _newname: &std::ffi::OsStr)
+    fn link_impl(&mut self, _req: &fuse::Request, inode: &Inode, newparent: &Inode, _newname: &std::ffi::OsStr)
                  -> Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
         inode.set_nlink(inode.nlink() + 1);
         self.file_mgr.flush(inode)?;
@@ -153,9 +153,9 @@ impl Rfs {
         Ok((attr, generation))
     }
 
-    fn unlink_impl(&mut self, _req: &fuse::Request, parent: &mut Inode, _name: &std::ffi::OsStr) -> Result<(), std::io::Error> {
+    fn unlink_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr) -> Result<(), std::io::Error> {
         let mut offset: usize = 0;
-        let mut inode = loop {
+        let inode = loop {
             let item = self.file_mgr.read_file(parent, offset * DIR_ITEM_SIZE, DIR_ITEM_SIZE)?;
             if item.is_empty() {
                 return Err(std::io::Error::from_raw_os_error(libc::ENOENT))
@@ -181,9 +181,9 @@ impl Rfs {
         let nlink = inode.nlink() - 1;
         if nlink > 0 {
             inode.set_nlink(nlink);
-            self.file_mgr.flush(&mut inode)?;
+            self.file_mgr.flush(&inode)?;
         } else {
-            self.file_mgr.del_inode(&mut inode)?;
+            self.file_mgr.del_inode(&inode)?;
         }
         Ok(())
     }
@@ -196,7 +196,7 @@ impl Rfs {
         self.file_mgr.read_file(inode, _offset as usize, _size as usize)
     }
 
-    fn write_impl(&mut self, _req: &fuse::Request, inode: &mut Inode, _offset: i64, _data: &[u8], _flags: u32)
+    fn write_impl(&mut self, _req: &fuse::Request, inode: &Inode, _offset: i64, _data: &[u8], _flags: u32)
                   ->Result<usize, std::io::Error> {
         if _offset < 0 {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
@@ -204,12 +204,12 @@ impl Rfs {
         self.file_mgr.write_file(inode, _offset as usize, _data)
     }
 
-    fn mkdir_impl(&mut self, _req: &fuse::Request, parent: &mut Inode, _name: &std::ffi::OsStr, _mode: u16)
+    fn mkdir_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr, _mode: u16)
                   -> Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
-        let mut inode = self.file_mgr.new_inode()?;
-        self.set_newly_created(_req, &mut inode, libc::S_IFDIR as u16 | (0o7777 &_mode))?;
-        self.link_with_nlink_unchanged(inode.id(), &mut inode, &std::ffi::OsString::from("."))?;
-        self.link_with_nlink_unchanged(parent.id(), &mut inode, &std::ffi::OsString::from(".."))?;
+        let inode = self.file_mgr.new_inode()?;
+        self.set_newly_created(_req, &inode, libc::S_IFDIR as u16 | (0o7777 &_mode))?;
+        self.link_with_nlink_unchanged(inode.id(), &inode, &std::ffi::OsString::from("."))?;
+        self.link_with_nlink_unchanged(parent.id(), &inode, &std::ffi::OsString::from(".."))?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
 
@@ -220,9 +220,9 @@ impl Rfs {
     }
 
     fn open_impl(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32)
-                    -> Result<Box<Inode>, std::io::Error> {
+                    -> Result<std::rc::Rc<Inode>, std::io::Error> {
         // TODO: Check permissions and flags
-        Ok(Box::new(self.file_mgr.read_inode(Rfs::as_id(_ino)?)?))
+        self.file_mgr.read_inode(Rfs::as_id(_ino)?)
     }
 
     fn readdir_impl(&mut self, _req: &fuse::Request, inode: &Inode, _offset: i64, reply: &mut fuse::ReplyDirectory)
@@ -246,11 +246,11 @@ impl Rfs {
         Ok(())
     }
 
-    fn create_impl(&mut self, _req: &fuse::Request, parent: &mut Inode, _name: &std::ffi::OsStr, _mode: u16, _flags: u32)
-                   -> Result<(Box<Inode>, fuse::FileAttr, u64 /* generation */), std::io::Error> {
+    fn create_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr, _mode: u16, _flags: u32)
+                   -> Result<(std::rc::Rc<Inode>, fuse::FileAttr, u64 /* generation */), std::io::Error> {
         // TODO: Check permissions and flags
-        let mut inode = Box::new(self.file_mgr.new_inode()?);
-        self.set_newly_created(_req, &mut inode, libc::S_IFREG as u16 | (0o7777 &_mode))?;
+        let inode = self.file_mgr.new_inode()?;
+        self.set_newly_created(_req, &inode, libc::S_IFREG as u16 | (0o7777 &_mode))?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
 
@@ -296,12 +296,12 @@ impl fuse::Filesystem for Rfs {
         _flags: Option<u32>, reply: fuse::ReplyAttr
     ) {
         let result = if let Some(fh) = _fh {
-            let inode = unsafe { &mut*(fh as *mut Inode) };
+            let inode = unsafe { &*(fh as *const Inode) };
             self.setattr_impl(_req, inode, _mode, _uid, _gid, _size, _atime, _mtime, _crtime, _chgtime, _bkuptime, _flags)
         } else {
             match self.open_impl(_req, _ino, _flags.unwrap_or_default() ) {
-                Ok(mut inode) => self.setattr_impl(
-                    _req, &mut inode, _mode, _uid, _gid, _size, _atime, _mtime, _crtime, _chgtime, _bkuptime, _flags
+                Ok(inode) => self.setattr_impl(
+                    _req, &inode, _mode, _uid, _gid, _size, _atime, _mtime, _crtime, _chgtime, _bkuptime, _flags
                 ),
                 Err(err) => return reply.error(err.raw_os_error().unwrap())
             }
@@ -314,8 +314,8 @@ impl fuse::Filesystem for Rfs {
 
     fn link(&mut self, _req: &fuse::Request, _ino: u64, _newparent: u64, _newname: &std::ffi::OsStr, reply: fuse::ReplyEntry) {
         match self.open_impl(_req, _newparent, 0) {
-            Ok(mut newparent) => match self.open_impl(_req, _ino, 0) {
-                Ok(mut inode) => match self.link_impl(_req, &mut inode, &mut newparent, _newname) {
+            Ok(newparent) => match self.open_impl(_req, _ino, 0) {
+                Ok(inode) => match self.link_impl(_req, &inode, &newparent, _newname) {
                     Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
                     Err(err) => reply.error(err.raw_os_error().unwrap())
                 },
@@ -327,7 +327,7 @@ impl fuse::Filesystem for Rfs {
 
     fn unlink(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
         match self.open_impl(_req, _parent, 0) {
-            Ok(mut parent) => if let Err(err) = self.unlink_impl(_req, &mut parent, _name) {
+            Ok(parent) => if let Err(err) = self.unlink_impl(_req, &parent, _name) {
                 reply.error(err.raw_os_error().unwrap())
             } else {
                 reply.ok()
@@ -338,7 +338,7 @@ impl fuse::Filesystem for Rfs {
 
     fn open(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
         match self.open_impl(_req, _ino, _flags) {
-            Ok(inode) => reply.opened(Box::into_raw(inode) as u64, _flags),
+            Ok(inode) => reply.opened(std::rc::Rc::into_raw(inode) as u64, _flags),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
@@ -355,7 +355,7 @@ impl fuse::Filesystem for Rfs {
         &mut self, _req: &fuse::Request, _ino: u64, _fh: u64, _offset: i64, _data: &[u8], _flags: u32,
         reply: fuse::ReplyWrite
     ) {
-        let inode = unsafe { &mut*(_fh as *mut Inode) };
+        let inode = unsafe { &*(_fh as *const Inode) };
         match self.write_impl(_req, inode, _offset, _data, _flags) {
             Ok(size) => reply.written(size as u32),
             Err(err) => reply.error(err.raw_os_error().unwrap())
@@ -370,7 +370,7 @@ impl fuse::Filesystem for Rfs {
         &mut self, _req: &fuse::Request, _ino: u64, _fh: u64, _flags: u32, _lock_owner: u64,
         _flush: bool, reply: fuse::ReplyEmpty
     ) {
-        unsafe { Box::from_raw(_fh as *mut Inode); }
+        unsafe { std::rc::Rc::from_raw(_fh as *const Inode); }
         reply.ok();
     }
 
@@ -380,7 +380,7 @@ impl fuse::Filesystem for Rfs {
 
     fn mkdir(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _mode: u32, reply: fuse::ReplyEntry) {
         match self.open_impl(_req, _parent, 0) {
-            Ok(mut parent) => match self.mkdir_impl(_req, &mut parent, _name, _mode as u16) {
+            Ok(parent) => match self.mkdir_impl(_req, &parent, _name, _mode as u16) {
                 Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
                 Err(err) => reply.error(err.raw_os_error().unwrap())
             },
@@ -390,7 +390,7 @@ impl fuse::Filesystem for Rfs {
 
     fn rmdir(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
         match self.open_impl(_req, _parent, 0) {
-            Ok(mut parent) => if let Err(err) = self.unlink_impl(_req, &mut parent, _name) {
+            Ok(parent) => if let Err(err) = self.unlink_impl(_req, &parent, _name) {
                 reply.error(err.raw_os_error().unwrap())
             } else {
                 reply.ok()
@@ -401,14 +401,14 @@ impl fuse::Filesystem for Rfs {
 
     fn opendir(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32, reply: fuse::ReplyOpen) {
         match self.open_impl(_req, _ino, _flags) {
-            Ok(inode) => reply.opened(Box::into_raw(inode) as u64, _flags),
+            Ok(inode) => reply.opened(std::rc::Rc::into_raw(inode) as u64, _flags),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn readdir(&mut self, _req: &fuse::Request, _ino: u64, _fh: u64, _offset: i64, _reply: fuse::ReplyDirectory) {
         let mut reply = _reply;
-        let inode = unsafe { &*(_fh as *mut Inode) };
+        let inode = unsafe { &*(_fh as *const Inode) };
         if let Err(err) = self.readdir_impl(_req, inode, _offset, &mut reply) {
             reply.error(err.raw_os_error().unwrap())
         } else {
@@ -417,7 +417,7 @@ impl fuse::Filesystem for Rfs {
     }
 
     fn releasedir(&mut self, _req: &fuse::Request, _ino: u64, _fh: u64, _flags: u32, reply: fuse::ReplyEmpty) {
-        unsafe { Box::from_raw(_fh as *mut Inode); }
+        unsafe { std::rc::Rc::from_raw(_fh as *const Inode); }
         reply.ok();
     }
 
@@ -429,9 +429,9 @@ impl fuse::Filesystem for Rfs {
         &mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _mode: u32, _flags: u32, reply: fuse::ReplyCreate
     ) {
         match self.open_impl(_req, _parent, 0) {
-            Ok(mut parent) => match self.create_impl(_req, &mut parent, _name, _mode as u16,  _flags) {
+            Ok(parent) => match self.create_impl(_req, &parent, _name, _mode as u16,  _flags) {
                 Ok((inode, attr, generation)) => reply.created(
-                    &time::Timespec::new(0, 0), &attr, generation, Box::into_raw(inode) as u64, _flags
+                    &time::Timespec::new(0, 0), &attr, generation, std::rc::Rc::into_raw(inode) as u64, _flags
                 ),
                 Err(err) => reply.error(err.raw_os_error().unwrap())
             },
