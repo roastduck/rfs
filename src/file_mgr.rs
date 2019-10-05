@@ -62,6 +62,10 @@ impl FileMgr {
     }
 
     pub fn del_inode(&mut self, inode: &Inode) -> Result<(), std::io::Error> {
+        let indirect_id = inode.indirect_id();
+        if indirect_id != 0 {
+            self.block_mgr.del_block(indirect_id)?;
+        }
         self.block_mgr.del_block(inode.id())
     }
 
@@ -129,7 +133,7 @@ impl FileMgr {
             let mut id = inode.data_block(blkno);
             let mut block = if id == 0 {
                 id = self.block_mgr.new_block()?;
-                inode.set_data_block(blkno, id);
+                inode.set_data_block(&mut self.block_mgr, blkno, id)?;
                 [0; BLOCK_SIZE]
             } else {
                 self.block_mgr.read_block(id)?
@@ -149,7 +153,7 @@ impl FileMgr {
             let mut id = inode.data_block(start_block - 1);
             let mut block = if id == 0 {
                 id = self.block_mgr.new_block()?;
-                inode.set_data_block(start_block - 1, id);
+                inode.set_data_block(&mut self.block_mgr, start_block - 1, id)?;
                 [0; BLOCK_SIZE]
             } else {
                 self.block_mgr.read_block(id)?
@@ -163,7 +167,7 @@ impl FileMgr {
             let mut id = inode.data_block(i);
             if id == 0 {
                 id = self.block_mgr.new_block()?;
-                inode.set_data_block(i, id);
+                inode.set_data_block(&mut self.block_mgr, i, id)?;
             }
             self.block_mgr.write_block(id, &data[write_cnt .. write_cnt + BLOCK_SIZE])?;
             write_cnt += BLOCK_SIZE;
@@ -173,7 +177,7 @@ impl FileMgr {
             let mut id = inode.data_block(end_block);
             let mut block = if id == 0 {
                 id = self.block_mgr.new_block()?;
-                inode.set_data_block(end_block, id);
+                inode.set_data_block(&mut self.block_mgr, end_block, id)?;
                 [0; BLOCK_SIZE]
             } else {
                 self.block_mgr.read_block(id)?
@@ -191,12 +195,12 @@ impl FileMgr {
 
     pub fn truncate_file(&mut self, inode: &Inode, length: usize) -> Result<(), std::io::Error> {
         if length < inode.length() as usize {
-            let block_cnt_plus_one = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let first_empty_block = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
             let old_block_cnt = (inode.length() as usize + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            for i in block_cnt_plus_one .. old_block_cnt {
+            for i in first_empty_block .. old_block_cnt {
                 let id = inode.data_block(i);
                 if id > 0 {
-                    inode.set_data_block(i, 0);
+                    inode.set_data_block(&mut self.block_mgr, i, 0)?;
                     self.block_mgr.del_block(id)?;
                 }
             }
@@ -334,6 +338,22 @@ mod tests {
         inode_b.set_uid(2);
         assert_eq!(inode_a.uid(), inode_b.uid());
         inode_mgr.flush(&inode_a)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_indirect_block() -> Result<(), std::io::Error> {
+        let mut inode_mgr = init()?;
+        let mut file = vec![];
+        for i in 0 .. 10000 {
+            file.push((i % 256) as u8)
+        }
+
+        let inode = inode_mgr.read_root_inode()?;
+        let offset = BLOCK_SIZE / std::mem::size_of::<Id>() * BLOCK_SIZE;
+        inode_mgr.write_file(&inode, offset, &file[..])?;
+        let file_read = inode_mgr.read_file(&inode, offset, file.len())?;
+        assert_eq!(file_read, file);
         Ok(())
     }
 }
