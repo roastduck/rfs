@@ -4,10 +4,11 @@ extern crate fuse;
 extern crate libc;
 
 use std::convert::TryInto;
+use std::str::FromStr;
 
 mod file_mgr;
 use file_mgr::*;
-use block_io::{Id, BLOCK_SIZE, FakeMemBlockIO};
+use block_io::*;
 use block_mgr::BlockMgr;
 use inode::Inode;
 
@@ -544,19 +545,39 @@ impl fuse::Filesystem for Rfs {
     }
 }
 
-fn main() -> Result<(), std::io::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let argv_ref: Vec<&std::ffi::OsStr> = argv.iter().map(|x| x.as_ref()).collect();
-    if argv.len() < 2 {
-        println!("Usage: {:?} mount_point [options ...]", argv[0]);
+    if argv.len() < 2 || !std::path::Path::new(&argv_ref[1]).is_dir() {
+        println!("Usage:");
+        println!(" {:?} mount_point [options ...]", argv[0]);
+        println!("Environment variables:");
+        println!(" RUST_LOG : Verbose log");
+        println!(" STORAGE_DIR=<any directory> : Location to store the filesystem content. Default to /tmp/rfs");
+        println!(" FAKE_STORAGE : Do not store content to STORAGE_DIR and use memory only. This is for debug purpose");
         std::process::exit(-1);
     }
 
-    let block_io = Box::new(FakeMemBlockIO::new()); // TODO: Use real block IO
+    let mut fake_storage = false;
+    let mut storage_path = std::path::PathBuf::from_str("/tmp/rfs")?;
+    for (key, value) in std::env::vars() {
+        match key.as_ref() {
+            "STORAGE_DIR" => storage_path = std::path::PathBuf::from_str(&value)?,
+            "FAKE_STORAGE" => fake_storage = true,
+            _ => ()
+        }
+    }
+
+    let block_io: Box<dyn BlockIO> = if fake_storage {
+        Box::new(FakeMemBlockIO::new())
+    } else {
+        Box::new(FileBlockIO::new(storage_path)?)
+    };
     let block_mgr = Box::new(BlockMgr::new(block_io));
     let file_mgr = Box::new(FileMgr::new(block_mgr));
-    fuse::mount(Rfs::new(file_mgr), &argv_ref[1], &argv_ref[2 ..])
+    fuse::mount(Rfs::new(file_mgr), &argv_ref[1], &argv_ref[2 ..])?;
+    Ok(())
 }
 
