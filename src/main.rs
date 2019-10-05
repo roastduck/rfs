@@ -26,6 +26,8 @@ impl Rfs {
         Rfs { file_mgr: file_mgr }
     }
 
+    // Helper functions
+
     fn as_id(x: u64) -> Result<Id, std::io::Error> {
         if x > Id::max_value() as u64 {
             Err(std::io::Error::from_raw_os_error(libc::EBADF))
@@ -104,11 +106,53 @@ impl Rfs {
         self.file_mgr.truncate_file(parent, parent.length() as usize - DIR_ITEM_SIZE)
     }
 
+    fn has_read_perm(_req: &fuse::Request, inode: &Inode) -> bool {
+        let perm = inode.perm();
+        if _req.uid() == inode.uid() && (perm & 0o400) > 0 {
+            return true
+        }
+        if _req.gid() == inode.gid() && (perm & 0o040) > 0 {
+            return true
+        }
+        if (perm & 0o004) > 0 {
+            return true
+        }
+        false
+    }
+
+    fn has_write_perm(_req: &fuse::Request, inode: &Inode) -> bool {
+        let perm = inode.perm();
+        if _req.uid() == inode.uid() && (perm & 0o200) > 0 {
+            return true
+        }
+        if _req.gid() == inode.gid() && (perm & 0o020) > 0 {
+            return true
+        }
+        if (perm & 0o002) > 0 {
+            return true
+        }
+        false
+    }
+
+    fn check_perm(_req: &fuse::Request, inode: &Inode, _flags: u32) -> Result<(), std::io::Error> {
+        let is_reading = _flags as i32 & libc::O_ACCMODE == libc::O_RDONLY || _flags as i32 & libc::O_ACCMODE == libc::O_RDWR;
+        let is_writing = _flags as i32 & libc::O_ACCMODE == libc::O_WRONLY || _flags as i32 & libc::O_ACCMODE == libc::O_RDWR;
+        if !Rfs::has_read_perm(_req, &inode) && is_reading {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        }
+        if !Rfs::has_write_perm(_req, &inode) && is_writing {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        }
+        Ok(())
+    }
+
+    // API implementations
+
     fn init_impl(&mut self, _req: &fuse::Request) -> Result<(), std::io::Error> {
         let need_format = !self.file_mgr.is_formatted()?;
         self.file_mgr.init(need_format)?;
         let root = self.file_mgr.read_root_inode()?;
-        self.set_newly_created(_req, &root, 0o040755)?;
+        self.set_newly_created(_req, &root, 0o040777)?; // uid = 0, so we must give others permission
         self.write_dir_item(root.id(), &root, &std::ffi::OsString::from("."))?;
         self.write_dir_item(root.id(), &root, &std::ffi::OsString::from(".."))?;
         Ok(())
@@ -117,7 +161,7 @@ impl Rfs {
     fn lookup_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr)
                    -> Result<(fuse::FileAttr, u64 /* generation */), std::io::Error> {
         let ino = self.lookup_item(_req, parent, _name)?.1;
-        let inode = self.open_impl(_req, ino as u64, 0)?;
+        let inode = self.file_mgr.read_inode(ino)?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
         Ok((attr, generation))
@@ -170,7 +214,7 @@ impl Rfs {
 
     fn unlink_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr) -> Result<(), std::io::Error> {
         let (offset, ino) = self.lookup_item(_req, parent, _name)?;
-        let inode = self.open_impl(_req, ino as u64, 0)?;
+        let inode = self.file_mgr.read_inode(ino)?;
         if inode.kind()? == fuse::FileType::Directory && inode.length() as usize > 2 * DIR_ITEM_SIZE { // 2 = "." + ".."
             return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
         }
@@ -244,8 +288,9 @@ impl Rfs {
 
     fn open_impl(&mut self, _req: &fuse::Request, _ino: u64, _flags: u32)
                     -> Result<std::rc::Rc<Inode>, std::io::Error> {
-        // TODO: Check permissions and flags
-        self.file_mgr.read_inode(Rfs::as_id(_ino)?)
+        let inode = self.file_mgr.read_inode(Rfs::as_id(_ino)?)?;
+        Rfs::check_perm(_req, &inode, _flags)?;
+        Ok(inode)
     }
 
     fn readdir_impl(&mut self, _req: &fuse::Request, inode: &Inode, _offset: i64, reply: &mut fuse::ReplyDirectory)
@@ -260,7 +305,7 @@ impl Rfs {
                 break
             }
             let (ino, name) = Rfs::parse_dir_item(&item);
-            let kind = self.open_impl(_req, ino as u64, 0)?.kind()?;
+            let kind = self.file_mgr.read_inode(ino)?.kind()?;
             if reply.add(ino as u64, offset as i64 + 1, kind, &name) {
                 break
             }
@@ -271,12 +316,12 @@ impl Rfs {
 
     fn create_impl(&mut self, _req: &fuse::Request, parent: &Inode, _name: &std::ffi::OsStr, _mode: u16, _flags: u32)
                    -> Result<(std::rc::Rc<Inode>, fuse::FileAttr, u64 /* generation */), std::io::Error> {
-        // TODO: Check permissions and flags
         let inode = self.file_mgr.new_inode()?;
         self.set_newly_created(_req, &inode, libc::S_IFREG as u16 | (0o7777 &_mode))?;
         let attr = self.getattr_impl(_req, &inode)?;
         let generation = inode.generation();
         self.write_dir_item(inode.id(), parent, _name)?;
+        Rfs::check_perm(_req, &inode, _flags)?;
         Ok((inode, attr, generation))
     }
 }
@@ -290,21 +335,21 @@ impl fuse::Filesystem for Rfs {
     }
 
     fn lookup(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEntry) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(inode) => match self.lookup_impl(_req, &*inode, _name) {
-                Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let inode = self.open_impl(_req, _parent, libc::O_RDONLY as u32)?;
+            self.lookup_impl(_req, &*inode, _name)
+        })() {
+            Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn getattr(&mut self, _req: &fuse::Request, _ino: u64, reply: fuse::ReplyAttr) {
-        match self.open_impl(_req, _ino, 0) {
-            Ok(inode) => match self.getattr_impl(_req, &*inode) {
-                Ok(attr) => reply.attr(&time::Timespec::new(0, 0), &attr),
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let inode = self.file_mgr.read_inode(Rfs::as_id(_ino)?)?; // No permision check?
+            self.getattr_impl(_req, &*inode)
+        })() {
+            Ok(attr) => reply.attr(&time::Timespec::new(0, 0), &attr),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
@@ -315,43 +360,41 @@ impl fuse::Filesystem for Rfs {
         _crtime: Option<time::Timespec>, _chgtime: Option<time::Timespec>, _bkuptime: Option<time::Timespec>,
         _flags: Option<u32>, reply: fuse::ReplyAttr
     ) {
-        let result = if let Some(fh) = _fh {
-            let inode = unsafe { &*(fh as *const Inode) };
-            self.setattr_impl(_req, inode, _mode, _uid, _gid, _size, _atime, _mtime, _crtime, _chgtime, _bkuptime, _flags)
-        } else {
-            match self.open_impl(_req, _ino, _flags.unwrap_or_default() ) {
-                Ok(inode) => self.setattr_impl(
-                    _req, &inode, _mode, _uid, _gid, _size, _atime, _mtime, _crtime, _chgtime, _bkuptime, _flags
-                ),
-                Err(err) => return reply.error(err.raw_os_error().unwrap())
-            }
-        };
-        match result {
+        match (|| {
+            let _inode;
+            let inode = if let Some(fh) = _fh {
+                unsafe { &*(fh as *const Inode) }
+            } else {
+                _inode = match _flags {
+                    Some(flags) => self.open_impl(_req, _ino, flags)?,
+                    None => self.file_mgr.read_inode(Rfs::as_id(_ino)?)? // No permision check?
+                };
+                &_inode
+            };
+            self.setattr_impl(_req, &inode, _mode, _uid, _gid, _size, _atime, _mtime, _crtime, _chgtime, _bkuptime, _flags)
+        })() {
             Ok(attr) => reply.attr(&time::Timespec::new(0, 0), &attr),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn link(&mut self, _req: &fuse::Request, _ino: u64, _newparent: u64, _newname: &std::ffi::OsStr, reply: fuse::ReplyEntry) {
-        match self.open_impl(_req, _newparent, 0) {
-            Ok(newparent) => match self.open_impl(_req, _ino, 0) {
-                Ok(inode) => match self.link_impl(_req, &inode, &newparent, _newname) {
-                    Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
-                    Err(err) => reply.error(err.raw_os_error().unwrap())
-                },
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let newparent = self.open_impl(_req, _newparent, libc::O_WRONLY as u32)?;
+            let inode = self.file_mgr.read_inode(Rfs::as_id(_ino)?)?; // No permision check?
+            self.link_impl(_req, &inode, &newparent, _newname)
+        })() {
+            Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn unlink(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(parent) => if let Err(err) = self.unlink_impl(_req, &parent, _name) {
-                reply.error(err.raw_os_error().unwrap())
-            } else {
-                reply.ok()
-            },
+        match (|| {
+            let parent = self.open_impl(_req, _parent, libc::O_WRONLY as u32)?;
+            self.unlink_impl(_req, &parent, _name)
+        })() {
+            Ok(_) => reply.ok(),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
@@ -359,38 +402,33 @@ impl fuse::Filesystem for Rfs {
     fn rename(
         &mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _newparent: u64,
         _newname: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(parent) => match self.open_impl(_req, _newparent, 0) {
-                Ok(newparent) => if let Err(err) = self.rename_impl(_req, &parent, _name, &newparent, _newname) {
-                    reply.error(err.raw_os_error().unwrap())
-                } else {
-                    reply.ok()
-                },
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let parent = self.open_impl(_req, _parent, libc::O_WRONLY as u32)?;
+            let newparent = self.open_impl(_req, _newparent, libc::O_WRONLY as u32)?;
+            self.rename_impl(_req, &parent, _name, &newparent, _newname)
+        })() {
+            Ok(_) => reply.ok(),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn symlink(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _link: &std::path::Path, reply: fuse::ReplyEntry) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(parent) => match self.symlink_impl(_req, &parent, _name, _link) {
-                Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let parent = self.open_impl(_req, _parent, libc::O_WRONLY as u32)?;
+            self.symlink_impl(_req, &parent, _name, _link)
+        })() {
+            Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn readlink(&mut self, _req: &fuse::Request, _ino: u64, reply: fuse::ReplyData) {
-        match self.open_impl(_req, _ino, 0) {
-            Ok(inode) => {
-                let len = inode.length();
-                match self.read_impl(_req, &inode, 0, len) {
-                    Ok(data) => reply.data(&data[..]),
-                    Err(err) => reply.error(err.raw_os_error().unwrap())
-                }
-            },
+        match (|| {
+            let inode = self.open_impl(_req, _ino, libc::O_RDONLY as u32)?;
+            let len = inode.length();
+            self.read_impl(_req, &inode, 0, len)
+        })() {
+            Ok(data) => reply.data(&data[..]),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
@@ -438,22 +476,21 @@ impl fuse::Filesystem for Rfs {
     }
 
     fn mkdir(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _mode: u32, reply: fuse::ReplyEntry) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(parent) => match self.mkdir_impl(_req, &parent, _name, _mode as u16) {
-                Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let parent = self.open_impl(_req, _parent, libc::O_WRONLY as u32)?;
+            self.mkdir_impl(_req, &parent, _name, _mode as u16)
+        })() {
+            Ok((attr, generation)) => reply.entry(&time::Timespec::new(0, 0), &attr, generation),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
 
     fn rmdir(&mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, reply: fuse::ReplyEmpty) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(parent) => if let Err(err) = self.unlink_impl(_req, &parent, _name) {
-                reply.error(err.raw_os_error().unwrap())
-            } else {
-                reply.ok()
-            },
+        match (|| {
+            let parent = self.open_impl(_req, _parent, libc::O_WRONLY as u32)?;
+            self.unlink_impl(_req, &parent, _name)
+        })() {
+            Ok(_) => reply.ok(),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
@@ -487,13 +524,13 @@ impl fuse::Filesystem for Rfs {
     fn create(
         &mut self, _req: &fuse::Request, _parent: u64, _name: &std::ffi::OsStr, _mode: u32, _flags: u32, reply: fuse::ReplyCreate
     ) {
-        match self.open_impl(_req, _parent, 0) {
-            Ok(parent) => match self.create_impl(_req, &parent, _name, _mode as u16,  _flags) {
-                Ok((inode, attr, generation)) => reply.created(
-                    &time::Timespec::new(0, 0), &attr, generation, std::rc::Rc::into_raw(inode) as u64, _flags
-                ),
-                Err(err) => reply.error(err.raw_os_error().unwrap())
-            },
+        match (|| {
+            let parent = self.open_impl(_req, _parent, libc::O_WRONLY as u32)?;
+            self.create_impl(_req, &parent, _name, _mode as u16, _flags)
+        })() {
+            Ok((inode, attr, generation)) => reply.created(
+                &time::Timespec::new(0, 0), &attr, generation, std::rc::Rc::into_raw(inode) as u64, _flags
+            ),
             Err(err) => reply.error(err.raw_os_error().unwrap())
         }
     }
